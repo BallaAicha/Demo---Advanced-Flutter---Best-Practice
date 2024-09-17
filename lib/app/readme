@@ -1,0 +1,278 @@
+  // Future<Response> login(LoginRequest request) async {
+  //   final formData = FormData.fromMap({
+  //     'email': request.email,
+  //     'password': request.password,
+  //   });
+  //
+  //   final response = await dio.post(
+  //     '${Constant.baseUrl}/login',
+  //     data: formData,
+  //     options: Options(
+  //       headers: {
+  //         'Content-Type': 'multipart/form-data',
+  //       },
+  //     ),
+  //   );
+  //
+  //   if (response.statusCode == 200) {
+  //     final loginResponse = LoginResponse.fromJson(response.data);
+  //     await tokenManager.saveTokens(loginResponse);
+  //     Navigator.pushNamedAndRemoveUntil(
+  //       navigatorKey.currentContext!,
+  //       Routes.mainRoute,
+  //       (route) => false,
+  //     );
+  //   }
+  //
+  //   return response;
+  // }
+  -------------------------
+  Voici ma logique de connexion :
+  Future<Response> login(LoginRequest request) async {
+    final formData = FormData.fromMap({
+      'email': request.email,
+      'password': request.password,
+    });
+
+    final response = await dio.post(
+      '${Constant.baseUrl}/login',
+      data: formData,
+      options: Options(
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+      ),
+    );
+
+    if (response.statusCode == 200) {
+      final loginResponse = LoginResponse.fromJson(response.data);
+      await tokenManager.saveTokens(loginResponse);
+
+      // Decode the access token
+      Map<String, dynamic> decodedToken = JwtDecoder.decode(loginResponse.accessToken);
+      LoggedUser loggedUser = LoggedUser(
+        decodedToken['sub'],
+        List<String>.from(decodedToken['roles']),
+        loginResponse.accessToken,
+        DateTime.fromMillisecondsSinceEpoch(decodedToken['exp'] * 1000, isUtc: true),
+      );
+
+      // Save the logged user to local storage
+      await tokenManager.saveLoggedUser(loggedUser);
+      if (kDebugMode) {
+        print('Logged user: $loggedUser');
+        print('Decoded token: $decodedToken');
+        print('Token expiration: ${DateTime.fromMillisecondsSinceEpoch(decodedToken['exp'] * 1000, isUtc: true)}');
+        print('Token sub: ${decodedToken['sub']}');
+        print('Token roles: ${decodedToken['roles']}');
+      }
+
+      // Auto logout after token expiration
+      int expirationTime = DateTime.fromMillisecondsSinceEpoch(decodedToken['exp'] * 1000, isUtc: true).millisecondsSinceEpoch;
+      int currentTime = DateTime.now().millisecondsSinceEpoch;
+      int timeUntilExpiration = expirationTime - currentTime;
+      Future.delayed(Duration(milliseconds: timeUntilExpiration), () {
+        // Perform auto logout
+        tokenManager.clearTokens();
+        Navigator.pushNamedAndRemoveUntil(
+          navigatorKey.currentContext!,
+          Routes.loginRoute,
+              (route) => false,
+        );
+      });
+
+      // Redirect based on role
+      if (decodedToken['roles'].contains('ADMIN')) {
+        Navigator.pushNamedAndRemoveUntil(
+          navigatorKey.currentContext!,
+          Routes.mainRoute,
+              (route) => false,
+          arguments: loggedUser,
+        );
+      } else if (decodedToken['roles'].contains('INSTRUCTOR')) {
+        final instructorDataSource = InstructorDataSource(dio, tokenManager);
+        final instructorRepository = InstructorRepositoryImpl(instructorDataSource);
+        final instructorUseCases = InstructorUseCases(instructorRepository);
+        final instructorViewModel = InstructorViewmodel(InstructorBloc(instructorUseCases));
+        instructorViewModel.fetchInstructorByEmail(decodedToken['sub']);
+        instructorViewModel.instructorBloc.stream.listen((state) {
+          if (state is InstructorByEmailSuccessState) {
+            loggedUser = LoggedUser(
+              decodedToken['sub'],
+              List<String>.from(decodedToken['roles']),
+              loginResponse.accessToken,
+              DateTime.fromMillisecondsSinceEpoch(decodedToken['exp'] * 1000, isUtc: true),
+              null,
+              state.instructor,
+            );
+            tokenManager.saveLoggedUser(loggedUser);
+            Navigator.pushNamedAndRemoveUntil(
+              navigatorKey.currentContext!,
+              Routes.instructorcourse,
+                  (route) => false,
+              arguments: state.instructor.instructorId.toString(),
+            );
+          }
+        });
+      } else if (decodedToken['roles'].contains('STUDENT')) {
+        final studentDataSource = StudentDataSource(dio, tokenManager);
+        final studentRepository = StudentRepositoryImpl(studentDataSource);
+        final studentUseCases = StudentUsecase(studentRepository);
+        final studentViewModel = Studentviewmodel(StudentBloc(studentUseCases));
+        studentViewModel.fetchStudentByEmail(decodedToken['sub']);
+        studentViewModel.studentBloc.stream.listen((state) {
+          if (state is StudentByEmailSuccessState) {
+            loggedUser = LoggedUser(
+              decodedToken['sub'],
+              List<String>.from(decodedToken['roles']),
+              loginResponse.accessToken,
+              DateTime.fromMillisecondsSinceEpoch(decodedToken['exp'] * 1000, isUtc: true),
+              state.student,
+              null,
+            );
+            tokenManager.saveLoggedUser(loggedUser);
+            Navigator.pushNamedAndRemoveUntil(
+              navigatorKey.currentContext!,
+              Routes.studentcourse,
+                  (route) => false,
+              arguments: state.student.studentId.toString(),
+            );
+          }
+        });
+      } else {
+        Navigator.pushNamedAndRemoveUntil(
+          navigatorKey.currentContext!,
+          Routes.mainRoute,
+              (route) => false,
+          arguments: loggedUser,
+        );
+      }
+    }
+
+    return response;
+  }
+  ————
+  Corrige cette logique MainView car il pose probleme , corrige la logique ,
+  import 'package:flutter/cupertino.dart';
+  import 'package:flutter/material.dart';
+
+  import '../../domain/model/logged_user.dart';
+  import '../course/courseview.dart';
+  import '../instructor-courses/instructor-courses.dart';
+  import '../instructor/instructorview.dart';
+  import '../ressources/assets_manager.dart';
+  import '../ressources/colors_manager.dart';
+  import '../ressources/strings_manager.dart';
+  import '../ressources/value_manager.dart';
+  import '../setting/settingview.dart';
+  import '../student-courses/student-courses.dart';
+  import '../student/studentview.dart';
+
+  class MainView extends StatefulWidget {
+    final LoggedUser loggedUser;
+
+    const MainView({super.key, required this.loggedUser});
+
+    @override
+    State<MainView> createState() => _MainViewState();
+  }
+
+  class _MainViewState extends State<MainView> {
+    late List<Widget> pages;
+    late List<String> titles;
+    late List<BottomNavigationBarItem> items;
+    var _title = AppStrings.courses;
+    var _currentIndex = 0;
+
+    @override
+    void initState() {
+      super.initState();
+      _initializeNavigation();
+    }
+
+    void _initializeNavigation() {
+      pages = [];
+      titles = [];
+      items = [];
+
+      if (widget.loggedUser.roles.contains('ADMIN')) {
+        pages.addAll([
+          Courseview(),
+          StudentView(),
+          InstructorView(),
+        ]);
+        titles.addAll([
+          AppStrings.courses,
+          AppStrings.student,
+          AppStrings.instructor,
+        ]);
+        items.addAll([
+          BottomNavigationBarItem(
+              icon: ImageIcon(AssetImage(IconAssets.course)), label: AppStrings.courses),
+          BottomNavigationBarItem(
+              icon: ImageIcon(AssetImage(IconAssets.student)), label: AppStrings.student),
+          BottomNavigationBarItem(
+              icon: ImageIcon(AssetImage(IconAssets.instructor)), label: AppStrings.instructor),
+        ]);
+      }
+
+      if (widget.loggedUser.roles.contains('INSTRUCTOR')) {
+        final instructorId = widget.loggedUser.instructor?.instructorId;
+        if (instructorId != null) {
+          pages.add(InstructorCourses(
+            instructorId: instructorId.toString(),
+          ));
+          titles.add(AppStrings.instructor);
+          items.add(BottomNavigationBarItem(
+              icon: ImageIcon(AssetImage(IconAssets.instructor)), label: AppStrings.instructor));
+        }
+      }
+
+      if (widget.loggedUser.roles.contains('STUDENT')) {
+        final studentId = widget.loggedUser.student?.studentId;
+        if (studentId != null) {
+          pages.add(StudentCourses(
+            studentId: studentId.toString(),
+          ));
+          titles.add(AppStrings.student);
+          items.add(BottomNavigationBarItem(
+              icon: ImageIcon(AssetImage(IconAssets.student)), label: AppStrings.student));
+        }
+      }
+
+      // Settings is visible for all roles
+      pages.add(SettingView(loggedUser: widget.loggedUser));
+      titles.add(AppStrings.settings);
+      items.add(BottomNavigationBarItem(
+          icon: Icon(Icons.settings), label: AppStrings.settings));
+    }
+
+    @override
+    Widget build(BuildContext context) {
+      return Scaffold(
+        appBar: AppBar(
+          title: Text(_title),
+        ),
+        body: pages.isNotEmpty ? pages[_currentIndex] : Center(child: Text(AppStrings.noRouteFound)),
+        bottomNavigationBar: Container(
+          decoration: BoxDecoration(boxShadow: [
+            BoxShadow(color: ColorManager.lightGrey, spreadRadius: AppSize.s1)
+          ]),
+          child: BottomNavigationBar(
+            selectedItemColor: ColorManager.primary,
+            unselectedItemColor: ColorManager.grey,
+            currentIndex: _currentIndex,
+            onTap: onTap,
+            items: items,
+          ),
+        ),
+      );
+    }
+
+    void onTap(int index) {
+      setState(() {
+        _currentIndex = index;
+        _title = titles[index];
+      });
+    }
+  }
